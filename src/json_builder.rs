@@ -18,7 +18,7 @@ pub enum State {
 
 pub enum Error {
 	IO(std::io::Error),
-	State(State)
+	State(State, Vec<State>)
 }
 
 pub struct JSONBuilder<'a> {
@@ -154,7 +154,9 @@ impl<'a> JSONBuilder<'a> {
 		let current = *self.stack.last().unwrap();
 		match current {
 			State::ObjectFirstKey | State::ObjectKey | State::End =>
-				return Err(Error::State(current)),
+				return Err(Error::State(current, vec![
+					State::Begin, State::ArrayElement, State::ArrayFirstElement, State::ObjectValue
+				])),
 
 			State::ArrayElement => {
 				write_bytes!(self, b",");
@@ -233,7 +235,9 @@ impl<'a> JSONBuilder<'a> {
 				self.stack[i] = State::ObjectValue;
 			},
 
-			_ => return Err(Error::State(self.stack[i]))
+			_ => return Err(Error::State(self.stack[i], vec![
+				State::ObjectFirstKey, State::ObjectKey
+			]))
 		}
 
 		self.indent()?;
@@ -275,7 +279,9 @@ impl<'a> JSONBuilder<'a> {
 				self.after_value();
 			},
 
-			_ => return Err(Error::State(self.stack[i]))
+			_ => return Err(Error::State(self.stack[i], vec![
+				State::ArrayElement, State::ArrayFirstElement
+			]))
 		}
 
 		Ok(())
@@ -306,7 +312,9 @@ impl<'a> JSONBuilder<'a> {
 					self.after_value();
 				},
 
-			_ => return Err(Error::State(self.stack[i]))
+			_ => return Err(Error::State(self.stack[i], vec![
+				State::ObjectKey, State::ObjectFirstKey
+			]))
 		}
 
 		Ok(())
@@ -317,11 +325,7 @@ impl<'a> JSONBuilder<'a> {
 		let current = self.stack[n - 1];
 
 		if n != 1 || current != State::End {
-			return Err(Error::State(current));
-		}
-
-		if self.indent_size > 0 {
-			write_bytes!(self, b"\n");
+			return Err(Error::State(current, vec![State::End]));
 		}
 
 		Ok(())
@@ -406,16 +410,6 @@ impl<T: IntoJSON> IntoJSON for Box<T> {
 	}
 }
 
-impl<T: IntoJSON> IntoJSON for Vec<T> {
-	fn into_json(&self, builder: &mut JSONBuilder) -> Result {
-		builder.begin_array()?;
-		for item in self {
-			builder.value(item)?;
-		}
-		builder.end_array()
-	}
-}
-
 impl<'a, T: IntoJSON> IntoJSON for &'a [T] {
 	fn into_json(&self, builder: &mut JSONBuilder) -> Result {
 		builder.begin_array()?;
@@ -426,6 +420,86 @@ impl<'a, T: IntoJSON> IntoJSON for &'a [T] {
 	}
 }
 
+macro_rules! impl_into_json_for_map {
+	($($t:ty),+) => {
+		$(
+			impl<'a, T: IntoJSON> IntoJSON for $t {
+				fn into_json(&self, builder: &mut JSONBuilder) -> Result {
+					builder.begin_object()?;
+					for (key, value) in self {
+						builder.key(key)?;
+						builder.value(value)?;
+					}
+					builder.end_object()
+				}
+			}
+		)+
+	}
+}
+
+impl_into_json_for_map!{
+	std::collections::BTreeMap<String, T>,
+	std::collections::BTreeMap<&'a str, T>,
+	std::collections::HashMap<String, T>,
+	std::collections::HashMap<&'a str, T>
+}
+
+macro_rules! impl_into_json_for_iterable {
+	($($t:ty),+) => {
+		$(
+			impl<T: IntoJSON> IntoJSON for $t {
+				fn into_json(&self, builder: &mut JSONBuilder) -> Result {
+					builder.begin_array()?;
+					for item in self {
+						builder.value(item)?;
+					}
+					builder.end_array()
+				}
+			}
+		)+
+	}
+}
+/*
+impl<T: IntoJSON> IntoJSON for std::collections::HashSet<T> {
+	fn into_json(&self, builder: &mut JSONBuilder) -> Result {
+		builder.begin_array()?;
+		for item in self.iter() {
+			builder.value(item)?;
+		}
+		builder.end_array()
+	}
+}
+*/
+impl_into_json_for_iterable!{
+	Vec<T>,
+//	std::collections::BinaryHeap<T>,
+	std::collections::BTreeSet<T>,
+//	std::collections::HashSet<T>,
+	std::collections::LinkedList<T>,
+	std::collections::VecDeque<T>
+}
+
+macro_rules! impl_into_json_for_array {
+	($($n:expr),+) => {
+		$(
+			impl<T: IntoJSON> IntoJSON for [T; $n] {
+				fn into_json(&self, builder: &mut JSONBuilder) -> Result {
+					builder.begin_array()?;
+					for item in self {
+						builder.value(item)?;
+					}
+					builder.end_array()
+				}
+			}
+		)+
+	}
+}
+
+// TODO: change to propper generics when const generics are supported
+impl_into_json_for_array!{
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+	17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
+}
 
 #[macro_export]
 #[doc(hidden)]
@@ -654,6 +728,10 @@ macro_rules! json {
 macro_rules! impl_into_json_internal_key {
 	($b:ident ($id:ident)) => {
 		$b.key(stringify!($id))?;
+	};
+
+	($b:ident ([$id:expr])) => {
+		$b.key($id)?;
 	};
 
 	($b:ident ($id:expr)) => {

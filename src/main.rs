@@ -1,3 +1,5 @@
+#![recursion_limit="128"]
+
 #[macro_use]
 mod json_builder;
 
@@ -29,8 +31,9 @@ impl_into_json! {
 		println!("/* serializing MyStruct */");
 		None as Option<i32>
 	},
-	// use a string constant as key
-	(FOO): "FOO?"
+	// use an expression as key
+	[FOO]: "FOO?",
+	["\r".to_string().as_str()]: "\n"
 }
 
 impl_into_json! {
@@ -82,6 +85,13 @@ fn do_stuff() -> Result {
 	let b = false;
 	let list = vec![1, 2, 3];
 	let nest_vec = vec![vec![], vec![2], vec![3]];
+	let mut map = std::collections::HashMap::new();
+	map.insert("foo", "bar");
+
+	let mut map2 = std::collections::HashMap::new();
+	map2.insert("egg".to_string(), "spam");
+
+	let array = ["a", " "];
 
 	let json = json!(pretty {
 		"key": ["foo", -12, 1 - 2, [], [[]]],
@@ -103,7 +113,12 @@ fn do_stuff() -> Result {
 			}]
 		},
 		"my_struct": &my_struct,
-		"tiny_struct": TinyStruct { i: 1 }
+		"tiny_struct": TinyStruct { i: 1 },
+		"vec3": vec!['a', 'b'],
+		"map": &map,
+		"map2": &map2,
+		"json": json!({"foo": -12})?,
+		"array": &array
 	})?;
 	println!("{}", json);
 
@@ -112,7 +127,7 @@ fn do_stuff() -> Result {
 
 fn main() {
 	match do_stuff() {
-		Err(Error::State(state)) => println!("Error: illegal state: {:?}", state),
+		Err(Error::State(got, expected)) => println!("Error: illegal state: {:?}, expected one of: {:?}", got, expected),
 		Err(Error::IO(err)) => println!("Error: IO error: {}", err),
 		_ => {}
 	}
