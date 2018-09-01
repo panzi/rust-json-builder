@@ -3,17 +3,38 @@ mod json_builder;
 
 use json_builder::{Result, JSONBuilder, IntoJSON, Error};
 
+const FOO: &'static str = "const FOO";
+
 struct MyStruct {
+	hidden: String,
 	foo: i32,
 	bar: String,
 	baz: Vec<bool>,
 	opt: Option<f32>
 }
 
+struct TinyStruct {
+	i: i32
+}
+
 impl_into_json! {
-	MyStruct, foo, bar, baz, opt,
-	virtual_field => {12},
-	"with spaces" => |s| s.foo - 44
+	MyStruct,
+	foo, bar, baz, opt,
+	virtual_field: "...",
+	"with spaces": |this| this.foo - 44,
+	bla: |this| this.foo as usize + this.baz.len(),
+	x: {1 + 2},
+	y: 3 + 4,
+	z: |_this| {
+		println!("/* serializing MyStruct */");
+		None as Option<i32>
+	},
+	// use a string constant as key
+	(FOO): "FOO?"
+}
+
+impl_into_json! {
+	TinyStruct, i
 }
 
 fn do_stuff() -> Result {
@@ -24,11 +45,13 @@ fn do_stuff() -> Result {
 	let multi = Some(Some(Some("multi")));
 	let boxed = Box::new(12);
 	let my_struct = MyStruct {
+		hidden: "this is not serialized".to_string(),
 		foo: 354,
 		bar: "bl bla".to_string(),
 		baz: vec![true, false],
 		opt: Some(-1.3e-2)
 	};
+	println!("the my_struct.hidden field won't be serialized: {}", my_struct.hidden);
 
 	b.begin_object()?;
 		b.item("foo", "bar")?;
@@ -46,6 +69,7 @@ fn do_stuff() -> Result {
 			b.value("a string")?;
 			b.value(&boxed)?;
 			b.value(&my_struct)?;
+			b.value(TinyStruct { i: 1 })?;
 		b.end_array()?;
 	b.end_object()?;
 	b.end()?;
@@ -59,21 +83,27 @@ fn do_stuff() -> Result {
 	let list = vec![1, 2, 3];
 	let nest_vec = vec![vec![], vec![2], vec![3]];
 
-	let json = pretty_json!({
-		"key" => ["foo", -12, (1 - 2), [], [[]]],
-		"another key" => true,
-		s => s,
-		"null" => (None as Option<i16>),
-		"str" => optstr,
-		"bool" => b,
-		"true" => true,
-		"int" => i,
-		"vec" => &list,
-		"vec2" => &nest_vec,
-		"empty1" => [],
-		"empty2" => {},
-		"boxed" => boxed,
-		"my_struct" => &my_struct
+	let json = json!(pretty {
+		"key": ["foo", -12, 1 - 2, [], [[]]],
+		"another key": true,
+		s: s,
+		"null": None as Option<i16>,
+		"str": optstr,
+		"bool": b,
+		&true.to_string(): true,
+		"int": i,
+		"vec": &list,
+		"vec2": &nest_vec,
+		"empty1": [],
+		"empty2": {},
+		"boxed": boxed,
+		"nested": {
+			s: [1, {
+				"nested": 2
+			}]
+		},
+		"my_struct": &my_struct,
+		"tiny_struct": TinyStruct { i: 1 }
 	})?;
 	println!("{}", json);
 

@@ -426,70 +426,195 @@ impl<'a, T: IntoJSON> IntoJSON for &'a [T] {
 	}
 }
 
-macro_rules! build_json_with_builder {
-	// $x:tt$($y:expr)* is a hacky pattern that allows things like -12 and &obj without parenthesis
-	($b:expr, [ $($x:tt$($y:expr)*),* ]) => {
-		match $b.begin_array() { Err(err) => break Err(err), _ => {} }
-		$(build_json_with_builder!($b, $x$($y)*);)*
-		match $b.end_array() { Err(err) => break Err(err), _ => {} }
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! json_unexpected {
+	() => {};
+}
+
+#[doc(hide)]
+macro_rules! json_internal {
+
+	// inspired by serde: https://github.com/serde-rs/json/blob/master/src/macros.rs
+
+	// ARRAY PARSER
+
+	// Done
+	($b:ident @array [$($elems:stmt)*]) => {
+		{
+			match $b.begin_array() { Err(err) => break Err(err), _ => {} }
+			$($elems)*
+			match $b.end_array() { Err(err) => break Err(err), _ => {} }
+		}
 	};
 
-	($b:expr, { $($key:expr => $x:tt$($y:expr)*),* }) => {
-		match $b.begin_object() { Err(err) => break Err(err), _ => {} }
-		$(
-			match $b.key($key) { Err(err) => break Err(err), _ => {} }
-			build_json_with_builder!($b, $x$($y)*);
-		)*
-		match $b.end_object() { Err(err) => break Err(err), _ => {} }
+	// Next element is an array.
+	($b:ident @array [$($elems:stmt)*] [$($array:tt)*] $($rest:tt)*) => {
+		json_internal!($b @array [$($elems)* json_internal!($b [$($array)*])] $($rest)*)
 	};
-	
-	($b:expr, $val:expr) => {
-		match $b.value($val) { Err(err) => break Err(err), _ => {} }
+
+	// Next element is an object.
+	($b:ident @array [$($elems:stmt)*] {$($object:tt)*} $($rest:tt)*) => {
+		json_internal!($b @array [$($elems)* json_internal!($b {$($object)*})] $($rest)*)
+	};
+
+	// Next element is an expression followed by comma.
+	($b:ident @array [$($elems:stmt)*] $next:expr, $($rest:tt)*) => {
+		json_internal!($b @array [$($elems)* json_internal!($b $next)] $($rest)*)
+	};
+
+	// Last element is an expression with no trailing comma.
+	($b:ident @array [$($elems:stmt)*] $last:expr) => {
+		json_internal!($b @array [$($elems)* json_internal!($b $last)])
+	};
+
+	// Comma after the most recent element.
+	($b:ident @array [$($elems:stmt)*] , $($rest:tt)*) => {
+		json_internal!($b @array [$($elems)*] $($rest)*)
+	};
+
+	// Unexpected token after most recent element.
+	($b:ident @array [$($elems:stmt)*] $unexpected:tt $($rest:tt)*) => {
+		json_unexpected!($unexpected)
+	};
+
+	// OBJECT PARSER
+	// We require two copies of the input tokens so that we can match on one
+	// copy and trigger errors on the other copy.
+
+	// Done.
+	($b:ident @object () () ()) => {};
+
+	// Insert the current entry followed by trailing comma.
+	($b:ident @object [$($key:tt)+] ($($value:tt)+) , $($rest:tt)*) => {
+		{
+			match $b.key($($key)+) { Err(err) => break Err(err), _ => {} }
+			{$($value)+}
+			json_internal!($b @object () ($($rest)*) ($($rest)*))
+		}
+	};
+
+	// Current entry followed by unexpected token.
+	($b:ident @object [$($key:tt)+] ($($value:tt)+) $unexpected:tt $($rest:tt)*) => {
+		json_unexpected!($unexpected)
+	};
+
+	// Insert the last entry without trailing comma.
+	($b:ident @object [$($key:tt)+] ($($value:tt)+)) => {
+		{
+			match $b.key($($key)+) { Err(err) => break Err(err), _ => {} }
+			{$($value)+}
+		}
+	};
+
+	// Next value is an array.
+	($b:ident @object ($($key:tt)+) (: [$($array:tt)*] $($rest:tt)*) $copy:tt) => {
+		json_internal!($b @object [$($key)+] (json_internal!($b [$($array)*])) $($rest)*)
+	};
+
+	// Next value is an object.
+	($b:ident @object ($($key:tt)+) (: {$($object:tt)*} $($rest:tt)*) $copy:tt) => {
+		json_internal!($b @object [$($key)+] (json_internal!($b {$($object)*})) $($rest)*)
+	};
+
+	// Next value is an expression followed by comma.
+	($b:ident @object ($($key:tt)+) (: $value:expr , $($rest:tt)*) $copy:tt) => {
+		json_internal!($b @object [$($key)+] (json_internal!($b $value)) , $($rest)*)
+	};
+
+	// Last value is an expression with no trailing comma.
+	($b:ident @object ($($key:tt)+) (: $value:expr) $copy:tt) => {
+		json_internal!($b @object [$($key)+] (json_internal!($b $value)))
+	};
+
+	// Missing value for last entry. Trigger a reasonable error message.
+	($b:ident @object ($($key:tt)+) (:) $copy:tt) => {
+		// "unexpected end of macro invocation"
+		json_internal!($b)
+	};
+
+	// Missing colon and value for last entry. Trigger a reasonable error
+	// message.
+	($b:ident @object ($($key:tt)+) () $copy:tt) => {
+		// "unexpected end of macro invocation"
+		json_internal!($b)
+	};
+
+	// Misplaced colon. Trigger a reasonable error message.
+	($b:ident @object () (: $($rest:tt)*) ($colon:tt $($copy:tt)*)) => {
+		// Takes no arguments so "no rules expected the token `:`".
+		json_unexpected!($colon)
+	};
+
+	// Found a comma inside a key. Trigger a reasonable error message.
+	($b:ident @object ($($key:tt)*) (, $($rest:tt)*) ($comma:tt $($copy:tt)*)) => {
+		// Takes no arguments so "no rules expected the token `,`".
+		json_unexpected!($comma)
+	};
+
+	// Key is fully parenthesized. This avoids clippy double_parens false
+	// positives because the parenthesization may be necessary here.
+	($b:ident @object () (($key:expr) : $($rest:tt)*) $copy:tt) => {
+		json_internal!($b @object ($key) (: $($rest)*) (: $($rest)*))
+	};
+
+	// Munch a token into the current key.
+	($b:ident @object ($($key:tt)*) ($tt:tt $($rest:tt)*) $copy:tt) => {
+		json_internal!($b @object ($($key)* $tt) ($($rest)*) ($($rest)*))
+	};
+
+	// VALUE PARSER
+
+	($b:ident []) => {
+		json_internal!($b @array [])
+	};
+
+	($b:ident [ $($tt:tt)+ ]) => {
+		json_internal!($b @array [] $($tt)+)
+	};
+
+	($b:ident {}) => {
+		{
+			match $b.begin_object() { Err(err) => break Err(err), _ => {} }
+			match $b.end_object() { Err(err) => break Err(err), _ => {} }
+		}
+	};
+
+	($b:ident { $($tt:tt)+ }) => {
+		{
+			match $b.begin_object() { Err(err) => break Err(err), _ => {} }
+			json_internal!($b @object () ($($tt)+) ($($tt)+));
+			match $b.end_object() { Err(err) => break Err(err), _ => {} }
+		}
+	};
+
+	// Any IntoJSON type: numbers, strings, struct literals, variables etc.
+	// Must be below every other rule.
+	($b:ident $other:expr) => {
+		match $b.value($other) { Err(err) => break Err(err), _ => {} }
 	};
 }
 
 #[macro_export]
 macro_rules! build_json {
-	($b:expr, $json:tt) => {
+	($writer:expr, $($json:tt)+) => {
 		loop {
-			let mut builder = JSONBuilder::new($b);
-			build_json_with_builder!(builder, $json);
+			let mut builder = JSONBuilder::new($writer);
+			json_internal!(builder $($json)+);
 			break builder.end();
 		}
 	}
 }
 
-#[macro_export]
-macro_rules! json {
-	($json:tt) => {
-		loop {
-			let mut data = Vec::<u8>::new();
-			{
-				let mut builder = JSONBuilder::new(&mut data);
-				build_json_with_builder!(builder, $json);
-				match builder.end() { Err(err) => break Err(err), _ => {} }
-			}
-			break Ok(String::from_utf8(data).unwrap());
-		}
-	}
-}
-
-#[macro_export]
-macro_rules! pretty_json {
-	($json:tt) => {
-		pretty_json!(1, true, $json)
-	};
-
-	($indent_size:expr, $json:tt) => {
-		pretty_json!($indent_size, true, $json)
-	};
-
-	($indent_size:expr, $tab_indent:expr, $json:tt) => {
+#[doc(hidden)]
+macro_rules! pretty_json_internal {
+	($indent_size:expr, $tab_indent:expr, $($json:tt)+) => {
 		loop {
 			let mut data = Vec::<u8>::new();
 			{
 				let mut builder = JSONBuilder::new_pretty(&mut data, $indent_size, $tab_indent);
-				build_json_with_builder!(builder, $json);
+				json_internal!(builder $($json)+);
 				match builder.end() { Err(err) => break Err(err), _ => {} }
 			}
 			break Ok(String::from_utf8(data).unwrap());
@@ -497,77 +622,110 @@ macro_rules! pretty_json {
 	};
 }
 
-macro_rules! impl_into_json_ {
-	($b:expr, $s:expr) => {};
-	($b:expr, $s:expr, ) => {};
-
-	($b:expr, $s:expr, $id:ident => |$l:ident| $ex:expr) => {
-		{
-			let $l = $s;
-			$b.item(stringify!($id), $ex)?;
-		}
+#[macro_export]
+macro_rules! json {
+	(spaces($indent_size:expr) $($json:tt)+) => {
+		pretty_json_internal!($indent_size, false, $($json)+)
 	};
 
-	($b:expr, $s:expr, $id:ident => $ex:expr) => {
-		$b.item(stringify!($id), $ex)?;
+	(tabs($indent_size:expr) $($json:tt)+) => {
+		pretty_json_internal!($indent_size, true, $($json)+)
 	};
 
-	($b:expr, $s:expr, $id:ident) => {
-		$b.item(stringify!($id), &$s.$id)?;
+	(spaces $($json:tt)+) => {
+		pretty_json_internal!(4, false, $($json)+)
 	};
 
-	($b:expr, $s:expr, $id:ident => |$l:ident| $ex:expr, $($more:tt)*) => {
-		{
-			let $l = $s;
-			$b.item(stringify!($id), $ex)?;
-		}
-		impl_into_json_!($b, $s, $($more)*);
+	(tabs $($json:tt)+) => {
+		pretty_json_internal!(1, true, $($json)+)
 	};
 
-	($b:expr, $s:expr, $id:ident => $ex:expr, $($more:tt)*) => {
-		$b.item(stringify!($id), $ex)?;
-		impl_into_json_!($b, $s, $($more)*);
+	(pretty $($json:tt)+) => {
+		pretty_json_internal!(1, true, $($json)+)
 	};
 
-	($b:expr, $s:expr, $id:expr => |$l:ident| $ex:expr) => {
-		{
-			let $l = $s;
-			$b.item($id, $ex)?;
-		}
-	};
-
-	($b:expr, $s:expr, $id:expr => $ex:expr) => {
-		$b.item($id, $ex)?;
-	};
-
-	($b:expr, $s:expr, $id:expr => |$l:ident| $ex:expr, $($more:tt)*) => {
-		{
-			let $l = $s;
-			$b.item($id, $ex)?;
-		}
-		impl_into_json_!($b, $s, $($more)*);
-	};
-
-	($b:expr, $s:expr, $id:expr => $ex:expr, $($more:tt)*) => {
-		$b.item($id, $ex)?;
-		impl_into_json_!($b, $s, $($more)*);
-	};
-
-	($b:expr, $s:expr, $id:ident, $($more:tt)*) => {
-		$b.item(stringify!($id), &$s.$id)?;
-		impl_into_json_!($b, $s, $($more)*);
+	($($json:tt)+) => {
+		pretty_json_internal!(0, true, $($json)+)
 	};
 }
 
 #[macro_export]
+#[doc(hidden)]
+macro_rules! impl_into_json_internal_key {
+	($b:ident ($id:ident)) => {
+		$b.key(stringify!($id))?;
+	};
+
+	($b:ident ($id:expr)) => {
+		$b.key($id)?;
+	};
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! impl_into_json_internal {
+	($b:ident $s:ident () ()) => {};
+	($b:ident $s:ident () (,)) => {};
+
+	($b:ident $s:ident ($($id:tt)*) (: |$self:ident| $ex:expr , $($more:tt)*)) => {
+		impl_into_json_internal_key!($b ($($id)*));
+		{
+			let $self = $s;
+			$b.value($ex)?;
+		}
+		impl_into_json_internal!($b $s () ($($more)*));
+	};
+
+	($b:ident $s:ident ($($id:tt)*) (: |$self:ident| $ex:expr)) => {
+		impl_into_json_internal_key!($b ($($id)*));
+		{
+			let $self = $s;
+			$b.value($ex)?;
+		}
+	};
+
+	($b:ident $s:ident ($($id:tt)*) (: $ex:expr , $($more:tt)*)) => {
+		impl_into_json_internal_key!($b ($($id)*));
+		$b.value($ex)?;
+		impl_into_json_internal!($b $s () ($($more)*));
+	};
+
+	($b:ident $s:ident ($($id:tt)*) (: $ex:expr)) => {
+		impl_into_json_internal_key!($b ($($id)*));
+		$b.value($ex)?;
+	};
+
+	($b:ident $s:ident ($id:ident) ()) => {
+		$b.item(stringify!($id), &$s.$id)?;
+	};
+
+	($b:ident $s:ident ($id:ident) (, $($more:tt)*)) => {
+		$b.item(stringify!($id), &$s.$id)?;
+		impl_into_json_internal!($b $s () ($($more)*));
+	};
+
+	($b:ident $s:ident ($($id:tt)*) (($($more:tt)*))) => {
+		impl_into_json_internal!($b $s ($($id)*) ($($more)*));
+	};
+
+	($b:ident $s:ident ($($id:tt)*) ($tt:tt $($more:tt)*)) => {
+		impl_into_json_internal!($b $s ($($id)* $tt) ($($more)*));
+	};
+}
+
+#[macro_export(local_inner_macros)]
 macro_rules! impl_into_json {
+	($t:ty) => {
+		impl_into_json!($t, );
+	};
+
 	($t:ty, $($def:tt)*) => {
 		impl IntoJSON for $t {
 			fn into_json(&self, builder: &mut JSONBuilder) -> Result {
 				builder.begin_object()?;
-				impl_into_json_!(builder, self, $($def)*);
+				impl_into_json_internal!(builder self () ($($def)*));
 				builder.end_object()
 			}
 		}
-	}
+	};
 }
